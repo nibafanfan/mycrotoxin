@@ -5,6 +5,7 @@
 *.xls
 *.tsv
 *.txt
+*.tgz
 
 # Python
 __pycache__/

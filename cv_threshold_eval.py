@@ -1,65 +1,73 @@
 #!/usr/bin/env python3
 """
-cv_threshold_eval.py  –  small-N friendly evaluation
-----------------------------------------------------
-• Performs stratified 5-fold CV on each endpoint that has labels.
-• Inside each training fold:
-      – sweeps thresholds (grid step 0.02)
-      – picks the one with the highest F1 on the *training* fold
-• Applies that threshold to the held-out fold → metrics
-• Collects:
-      – mean ± std   (AUROC, AUPRC, F1, precision, recall)
-      – the five chosen thresholds  → median threshold
-• Bootstraps that median threshold to give a 95 % CI.
+cv_threshold_eval.py – cross-validated threshold search with bootstrap CI
+---------------------------------------------------------------------------
+• Stratified k-fold CV (k given by --k, default 5)
+• Optional repeats (e.g. --repeat 10 gives 10×k = 50 test folds)
+• Inside each training split:
+      – sweep thresholds (0.00 … 1.00, step 0.02)
+      – pick the one with highest F1 on the train fold
+• Collect per-fold metrics on the held-out fold
+• Return mean ± std for AUROC / AUPRC / F1 / Prec / Recall
+• Compute the median of all fold-specific thresholds
+• 2 000-× bootstrap of that median → 95 % CI
 """
 
-import argparse, pandas as pd, numpy as np
+import argparse, numpy as np, pandas as pd, sys
 from sklearn.metrics import (
     roc_auc_score, average_precision_score,
     precision_score, recall_score, f1_score
 )
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import (
+    StratifiedKFold, RepeatedStratifiedKFold
+)
 
-GRID = np.linspace(0, 1, 51)          # 0.00, 0.02, … 1.00
-BOOT_N = 2000                         # bootstrap draws
+GRID   = np.linspace(0, 1, 51)   # 0.00, 0.02, …, 1.00
+BOOT_N = 2000                   # bootstrap samples
+EP     = ["Carcinogenicity", "Mutagenicity", "Genotoxicity"]
 
-def pick_best_threshold(y, p):
+def best_threshold(y, p):
     best_f1, best_t = -1, 0
     for t in GRID:
-        yhat = (p >= t)
-        f1 = f1_score(y, yhat, zero_division=0)
+        f1 = f1_score(y, p >= t, zero_division=0)
         if f1 > best_f1:
             best_f1, best_t = f1, t
     return best_t
 
-def cv_endpoint(df, ep, id_col, k=5, seed=42):
-    y = df[f"True_{ep}"].dropna()
-    idx = y.index
-    p = df.loc[idx, f"Pred_{ep}"].values
-    y = y.values.astype(int)
+def cv_endpoint(df, ep, id_col, k, repeat, seed=42):
+    y_all = df[f"True_{ep}"].dropna()
+    idx   = y_all.index
+    p_all = df.loc[idx, f"Pred_{ep}"].values
+    y_all = y_all.values.astype(int)
 
-    skf = StratifiedKFold(k, shuffle=True, random_state=seed)
+    splitter = (StratifiedKFold(k, shuffle=True, random_state=seed)
+                if repeat == 1 else
+                RepeatedStratifiedKFold(
+                    n_splits=k, n_repeats=repeat, random_state=seed))
+
     rows, chosen = [], []
-    for train, test in skf.split(np.zeros(len(y)), y):
-        # pick threshold on train
-        thr = pick_best_threshold(y[train], p[train])
+    for train, test in splitter.split(np.zeros(len(y_all)), y_all):
+        thr = best_threshold(y_all[train], p_all[train])
         chosen.append(thr)
-        # apply to test
-        yhat = (p[test] >= thr)
+
+        yhat = p_all[test] >= thr
         rows.append(dict(
-            AUROC  = roc_auc_score(y[test], p[test]) if len(np.unique(y[test]))>1 else np.nan,
-            AUPRC  = average_precision_score(y[test], p[test]),
-            F1     = f1_score(y[test], yhat, zero_division=0),
-            Prec   = precision_score(y[test], yhat, zero_division=0),
-            Recall = recall_score(y[test], yhat, zero_division=0)
+            AUROC  = roc_auc_score(y_all[test], p_all[test])
+                     if len(np.unique(y_all[test])) > 1 else np.nan,
+            AUPRC  = average_precision_score(y_all[test], p_all[test]),
+            F1     = f1_score(y_all[test], yhat, zero_division=0),
+            Prec   = precision_score(y_all[test], yhat, zero_division=0),
+            Recall = recall_score(y_all[test], yhat, zero_division=0)
         ))
+
     m = pd.DataFrame(rows).mean().to_dict()
     s = pd.DataFrame(rows).std().to_dict()
-    # bootstrap the median of chosen thresholds
+
     rng = np.random.default_rng(0)
     meds = [np.median(rng.choice(chosen, len(chosen), replace=True))
             for _ in range(BOOT_N)]
     ci = np.percentile(meds, [2.5, 50, 97.5])
+
     return m, s, chosen, ci
 
 def main():
@@ -67,16 +75,19 @@ def main():
     ap.add_argument("--pred",  default="chemprop_canonical.csv")
     ap.add_argument("--truth", default="experimental_labels.csv")
     ap.add_argument("--id",    default="cid")
-    a = ap.parse_args()
+    ap.add_argument("--k",     type=int, default=5,
+                    help="number of CV folds (default 5)")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="repeat the k-fold CV n times (default 1)")
+    args = ap.parse_args()
 
-    df = pd.merge(pd.read_csv(a.truth), pd.read_csv(a.pred), on=a.id)
-    endpoints = [c[len("True_"):] for c in df.columns if c.startswith("True_")]
+    df = pd.merge(pd.read_csv(args.truth), pd.read_csv(args.pred), on=args.id)
 
-    print(f"Evaluating endpoints: {endpoints}\n")
+    print(f"Evaluating endpoints: {EP}\n")
 
     res = []
-    for ep in endpoints:
-        m, s, chosen, ci = cv_endpoint(df, ep, a.id)
+    for ep in EP:
+        m, s, chosen, ci = cv_endpoint(df, ep, args.id, args.k, args.repeat)
         res.append(dict(
             Endpoint = ep,
             N        = df[f"True_{ep}"].notna().sum(),
@@ -94,21 +105,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-import pandas as pd
-
-# 1. load predictions
-pred = pd.read_csv("chemprop_canonical.csv")
-
-# 2. assign flags using the CV-derived cut-offs
-pred["Flag_Carc"] = (pred["Pred_Carcinogenicity"] >= 0.02).astype(int)
-pred["Flag_Muta"] = (pred["Pred_Mutagenicity"]    >= 0.08).astype(int)
-
-# Genotoxicity: 3-tier label
-pred["Geno_Tier"] = pd.cut(
-    pred["Pred_Genotoxicity"],
-    bins=[-1, 0.05, 0.70, 1.01],
-    labels=["negative", "borderline", "positive"]
-)
-
-pred.to_csv("chemprop_screened.csv", index=False)
-print("✓ screening flags written → chemprop_screened.csv")
