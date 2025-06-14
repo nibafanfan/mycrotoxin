@@ -39,3 +39,4 @@ ENV/
 .vscode/
 *.swp
 *.swo 
+/chemprop_api_raw.jsonl
