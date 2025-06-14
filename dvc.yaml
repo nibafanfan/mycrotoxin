@@ -1,0 +1,29 @@
+stages:
+  # ------------------------------------------------------------------
+  # 1️⃣  Flatten raw API output ➜ tidy Parquet
+  # ------------------------------------------------------------------
+  chemprop_flatten:
+    cmd: |
+      python chemprop_pipeline.py \
+        --jsonl chemprop_api_raw.jsonl \
+        --out  chemprop_flat.parquet
+    deps:
+      - chemprop_api_raw.jsonl        # the raw JSON-lines file
+      - chemprop_pipeline.py          # the script itself
+    outs:
+      - chemprop_flat.parquet         # tidy, version-controlled feature table
+
+  # ------------------------------------------------------------------
+  # (optional) 2️⃣  Benchmark subset vs. all features
+  #             – only runs when you pass params; not an automatic stage
+  # ------------------------------------------------------------------
+  # chemprop_benchmark:
+  #   cmd: |
+  #     python chemprop_benchmark.py \
+  #       --parquet chemprop_flat.parquet \
+  #       --labels  labels.csv
+  #   deps:
+  #     - chemprop_flat.parquet
+  #     - labels.csv
+  #     - chemprop_benchmark.py
+  #   # no outs: model metrics just print to stdout
