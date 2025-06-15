@@ -1,5 +1,0 @@
-outs:
-- md5: 9721ed595f3e9fb3f08183b96e36cd4f
-  size: 3360648720
-  hash: md5
-  path: chemprop_api_raw.jsonl

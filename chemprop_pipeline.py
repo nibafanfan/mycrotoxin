@@ -13,6 +13,7 @@ Output
                                columns:
                                    • name, cid, InChI   (metadata)
                                    • pred_<token>       (numeric prediction)
+                                   • api_response_json  (raw API response)
 
 The script is 100 % idempotent: if chemprop_flat.parquet already exists
 and is newer than the JSONL, nothing happens – perfect for a DVC stage.
@@ -38,6 +39,7 @@ def flatten(jsonl_path: pathlib.Path) -> pd.DataFrame:
                 "name":  rec["name"],
                 "cid":   rec.get("cid"),
                 "InChI": rec["InChI"],
+                "api_response_json": ln.strip(),  # keep raw JSON for category lookup
             }
             # one numeric column per assay/property
             for p in rec["api_response"]:
@@ -47,7 +49,7 @@ def flatten(jsonl_path: pathlib.Path) -> pd.DataFrame:
 
     df = pd.DataFrame(rows).set_index("index").sort_index()
     # keep column order stable: metadata first, then predictions sorted
-    meta_cols = ["name", "cid", "InChI"]
+    meta_cols = ["name", "cid", "InChI", "api_response_json"]
     pred_cols = sorted(c for c in df.columns if c.startswith("pred_"))
     return df[meta_cols + pred_cols]
 
@@ -55,7 +57,7 @@ def main(jsonl: str, out: str) -> None:
     jsonl_path = pathlib.Path(jsonl).resolve()
     out_path   = pathlib.Path(out).resolve()
 
-    # —— smart “do nothing if up-to-date” logic
+    # —— smart "do nothing if up-to-date" logic
     if out_path.exists() and out_path.stat().st_mtime >= jsonl_path.stat().st_mtime:
         print(f"✔ {out_path.name} already up to date ({out_path.stat().st_size/1e6:.1f} MB)")
         return

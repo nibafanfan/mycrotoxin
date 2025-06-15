@@ -1,4 +1,0 @@
-thresholds:
-  Carcinogenicity: 0.02
-  Mutagenicity:    0.40
-  Genotoxicity:    0.65

@@ -30,6 +30,9 @@ SUCCESS_CSV     = "success copy.csv"
 INCHI_FAIL_CSV  = "inchi_failures.csv"
 PRED_FAIL_CSV   = "prediction_failures.csv"
 
+# Add new file for raw API responses
+RAW_API_JSONL = "chemprop_api_raw.jsonl"
+
 # silence RDKit warnings
 RDLogger.DisableLog("rdApp.warning")
 
@@ -109,7 +112,7 @@ done_index = set(success_df.get("index", [])) \
            | set(pred_fail_df.get("index", []))
 print(f"[checkpoint] already finished: {len(done_index)} rows")
 
-# convert back to plain python lists we’ll append to
+# convert back to plain python lists we'll append to
 succ, inchi_fail, pred_fail = (success_df.to_dict("records"),
                                inchi_fail_df.to_dict("records"),
                                pred_fail_df.to_dict("records"))
@@ -129,16 +132,31 @@ def _graceful_exit(signum, frame):
 signal.signal(signal.SIGINT, _graceful_exit)
 
 # ───────────────────────── LOAD RAW CSV ─────────────────────
+# ───────────────────────── LOAD RAW CSV ─────────────────────
 raw_df = pd.read_csv(RAW_CSV, sep=";").rename(columns=str.strip)
+
+# 1️⃣  keep only rows that have at least one of the three labels
+LABEL_COLS = [
+    "experimental mutagenicity",
+    "experimental in vitro genotoxicity",
+    "experimental carcinogenicity",
+]
+raw_df = raw_df[ raw_df[LABEL_COLS].notna().any(axis=1) ]
+
+# optional: for quick tests grab HEAD_N rows **after** filtering
 if HEAD_N:
     raw_df = raw_df.head(HEAD_N)
 
+# 2️⃣  resume logic (skip anything already in a checkpoint)
 todo_df = raw_df[~raw_df["index"].isin(done_index)]
-
 print(f"processing {len(todo_df)} remaining rows …")
+
 
 # ───────────────────────── MAIN LOOP ────────────────────────
 since_last_flush = 0
+
+# Open the raw API file for appending
+raw_api_file = open(RAW_API_JSONL, "a")
 
 try:
     for _, row in tqdm(todo_df.iterrows(), total=len(todo_df)):
@@ -171,6 +189,9 @@ try:
             since_last_flush += 1
             continue
 
+        # Save the raw API response
+        raw_api_file.write(json.dumps({"index": idx, "name": name, "cid": cid, "InChI": inch, "api_response": pred}) + "\n")
+
         out            = {**row.to_dict(), "InChI": inch}
         for p in pred:
             for cat in p["property"]["categories"]:
@@ -189,4 +210,5 @@ try:
 finally:
     # always flush at the very end or on unhandled error
     flush()
+    raw_api_file.close()
     print(f"\n✅  success: {len(succ)}   ❌ inchi_fail: {len(inchi_fail)}   ❌ pred_fail: {len(pred_fail)}")

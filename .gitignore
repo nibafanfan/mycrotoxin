@@ -40,3 +40,9 @@ ENV/
 *.swp
 *.swo 
 /chemprop_api_raw.jsonl
+
+old/
+*.parquet
+*.log
+
+temp/
