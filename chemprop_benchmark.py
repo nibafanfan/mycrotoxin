@@ -1,88 +1,90 @@
 #!/usr/bin/env python3
-# chemprop_benchmark.py
 """
-Compare two feature-selection strategies for multiple endpoints
-(genotoxicity, carcinogenicity, mutagenicity).
+chemprop_benchmark.py  –  compare two ChemProp feature sets under elastic‑net
+logistic regression with nested cross‑validation.
 
-Strategy A  – only those property_tokens whose category list contains
-              any of {carcinogenicity, mutagenicity, genotoxicity}
-Strategy B  – every prediction column in the file
+Strategy A  =  only tokens whose category list mentions {carcinogenicity,
+                 mutagenicity, genotoxicity}
+Strategy B  =  all ~4 000 ChemProp prediction columns
 
-Both are evaluated with the same elastic-net logistic model under
-stratified k-fold cross-validation (default k = 5).
+Changes (2025‑06‑15)
+────────────────────
+* Replaced plain `LogisticRegression` with **`LogisticRegressionCV`** to let
+  scikit‑learn find the optimal C value per fold and to run until convergence
+  (option 2 in our earlier discussion).  This eliminates `ConvergenceWarning`
+  spam without loosening tolerances or increasing max_iter globally.
+* Added a common grid `Cs = [0.02, 0.1, 0.5, 1]` that mirrors the selector
+  grid in the main pipeline.
 
----------------------------------------------------------------------------
-Inputs
-  • chemprop_flat.parquet   – produced by chemprop_pipeline.py
-  • labels.csv              – columns: index, genotoxicity, carcinogenicity, mutagenicity
-
-Example labels.csv
-    index,genotoxicity,carcinogenicity,mutagenicity
-    1677,1,0,1
-    1021,0,1,0
-    …
-
-Run
+Run example
     python chemprop_benchmark.py \
         --parquet chemprop_flat.parquet \
         --labels  labels.csv \
         --kfolds  5 \
         --seed    42
----------------------------------------------------------------------------
-
-Requires: pandas, numpy, scikit-learn, tqdm, pyarrow
 """
-import argparse, json, collections, pandas as pd, numpy as np, pathlib, warnings
+import argparse, json, pathlib, warnings
+from functools import partial
+
+import numpy as np
+import pandas as pd
 from tqdm import tqdm
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import roc_auc_score, balanced_accuracy_score
 
 warnings.filterwarnings("ignore", category=FutureWarning)
-CATS = {"carcinogenicity", "mutagenicity", "genotoxicity"}
-ENDPOINTS = ["genotoxicity", "carcinogenicity", "mutagenicity"]
 
-# -------------------------------------------------------------------------- #
-# 1. Build token → categories lookup once from the JSON baked into parquet
-# -------------------------------------------------------------------------- #
+CATS       = {"carcinogenicity", "mutagenicity", "genotoxicity"}
+ENDPOINTS  = ["genotoxicity", "carcinogenicity", "mutagenicity"]
+C_GRID     = [0.02, 0.1, 0.5, 1]       # shared across all folds
+MAX_ITER   = 10_000
+
+# ──────────────────────────────────────────────────────────────────────────────
+# helper: build token→category table from embedded JSON
+# ──────────────────────────────────────────────────────────────────────────────
+
 def token_catalog(df: pd.DataFrame) -> pd.DataFrame:
-    # parquet has no category info; pull it out of a single embedded json cell
-    # find the first non-null record that still holds raw API json (kept by pipeline)
-    raw_json = None
-    for col in ("api_response_json", "api_response"):   # back-compat
-        if col in df.columns:
-            raw_json = df[col].dropna().iloc[0]
-            break
-    if raw_json is None:
-        raise RuntimeError("The parquet no longer contains raw API JSON; "
-                           "cannot reconstruct category list.")
-    import json
-    rec = json.loads(raw_json)    # one molecule is enough
-    # rec structure: api_response is list; each has property_token & categories
-    tok2cats = {p["property_token"]:
-                ";".join(sorted({c["category"] for c in p["property"]["categories"]}))
-                for p in rec["api_response"]}
-    return pd.DataFrame({"tok": list(tok2cats),
-                         "cats": list(tok2cats.values())})
+    """Return DataFrame with columns [tok, cats] extracted from first JSON cell."""
+    col = next((c for c in ("api_response_json", "api_response") if c in df), None)
+    if col is None:
+        raise RuntimeError("No raw API JSON found; cannot recover categories.")
+    rec = json.loads(df[col].dropna().iloc[0])  # one compound is enough
+    pairs = {
+        p["property_token"]: ";".join(sorted({c["category"] for c in p["property"]["categories"]}))
+        for p in rec["api_response"]
+    }
+    return pd.DataFrame({"tok": list(pairs), "cats": list(pairs.values())})
 
-# -------------------------------------------------------------------------- #
-# 2. Model evaluation
-# -------------------------------------------------------------------------- #
+# ──────────────────────────────────────────────────────────────────────────────
+# modelling util – uses LogisticRegressionCV (elastic‑net with L1 ratio 0.5)
+# ──────────────────────────────────────────────────────────────────────────────
+
 def cv_eval(X: pd.DataFrame, y: pd.Series, tag: str, k: int, seed: int):
     skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
     aucs, baccs = [], []
     for tr, te in skf.split(X, y):
         y_tr = y.iloc[tr]
-        if len(y_tr.unique()) < 2:
-            print(f"Warning: Fold contains only one class. Skipping fold.")
-            continue
+        if y_tr.nunique() < 2:
+            continue  # skip degenerate folds
         pipe = make_pipeline(
             StandardScaler(with_mean=False),
-            LogisticRegression(solver="saga", penalty="elasticnet",
-                               l1_ratio=0.5, max_iter=4000,
-                               random_state=seed),
+            LogisticRegressionCV(
+                Cs=C_GRID,
+                penalty="elasticnet",
+                solver="saga",
+                class_weight="balanced",
+                l1_ratios=[0.5],
+                max_iter=MAX_ITER,
+                n_jobs=-1,
+                random_state=seed,
+                scoring="roc_auc",
+            ),
         )
         pipe.fit(X.iloc[tr], y_tr)
         proba = pipe.predict_proba(X.iloc[te])[:, 1]
@@ -90,53 +92,51 @@ def cv_eval(X: pd.DataFrame, y: pd.Series, tag: str, k: int, seed: int):
         aucs.append(roc_auc_score(y.iloc[te], proba))
         baccs.append(balanced_accuracy_score(y.iloc[te], preds))
     if aucs:
-        print(f"{tag:<6}| AUROC {np.mean(aucs):.3f}±{np.std(aucs):.3f}"
-              f" | BACC {np.mean(baccs):.3f} | n_feat={X.shape[1]}")
+        print(f"{tag:<6}| AUROC {np.mean(aucs):.3f}±{np.std(aucs):.3f} | "
+              f"BACC {np.mean(baccs):.3f} | n_feat={X.shape[1]}")
     else:
-        print(f"{tag:<6}| No valid folds found.")
+        print(f"{tag:<6}| No valid folds")
 
-# -------------------------------------------------------------------------- #
+# ──────────────────────────────────────────────────────────────────────────────
+# main routine
+# ──────────────────────────────────────────────────────────────────────────────
+
 def main(parquet: str, labels: str, kfolds: int, seed: int):
-    df = pd.read_parquet(parquet)
+    df        = pd.read_parquet(parquet)
     labels_df = pd.read_csv(labels)
-    
-    # Merge on 'cid'
-    if 'cid' not in df.columns or 'cid' not in labels_df.columns:
-        raise ValueError("Both feature and label files must have a 'cid' column.")
-    merged = pd.merge(df, labels_df, on='cid', how='inner')
-    
+
+    if "cid" not in df.columns or "cid" not in labels_df.columns:
+        raise ValueError("Both files must have a 'cid' column for merging.")
+    merged = df.merge(labels_df, on="cid", how="inner")
+
     tok_tbl = token_catalog(df)
     subset_tok = tok_tbl.loc[
-        tok_tbl.cats.str.contains("|".join(CATS), case=False, na=False),
-        "tok"
+        tok_tbl.cats.str.contains("|".join(CATS), case=False, na=False), "tok"
     ]
 
-    subset_cols = [f"pred_{t}" for t in subset_tok if f"pred_{t}" in df.columns]
-    all_cols    = [c for c in df.columns if c.startswith("pred_")]
+    subset_cols = [f"pred_{t}" for t in subset_tok if f"pred_{t}" in merged.columns]
+    all_cols    = [c for c in merged.columns if c.startswith("pred_")]
 
-    # drop columns with <10 % non-null values
-    min_n = 0.1 * len(df)
+    min_n = 0.1 * len(merged)  # keep cols with ≥10 % non‑null
     X_sub = merged[subset_cols].loc[:, merged[subset_cols].notna().sum() >= min_n]
     X_all = merged[all_cols].loc[:,   merged[all_cols].notna().sum()   >= min_n]
 
-    print(f"{len(merged)} molecules  |  subset features {X_sub.shape[1]}  |  all features {X_all.shape[1]}")
-    
-    # Handle each endpoint separately
+    print(f"{len(merged)} molecules | subset {X_sub.shape[1]} feats | all {X_all.shape[1]} feats")
+
     for endpoint in ENDPOINTS:
         print(f"\n{endpoint.upper()}:")
         y = merged[endpoint].astype(float)
         mask = y.notna()
         if mask.sum() < 2:
-            print(f"Not enough samples for {endpoint}. Skipping.")
-            continue
+            print("Not enough samples – skipped"); continue
         cv_eval(X_sub[mask], y[mask], "SUBSET", kfolds, seed)
         cv_eval(X_all[mask], y[mask], "ALL",    kfolds, seed)
 
-# -------------------------------------------------------------------------- #
+# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--parquet", required=True, help="chemprop_flat.parquet")
-    ap.add_argument("--labels",  required=True, help="labels.csv (index,genotoxicity,carcinogenicity,mutagenicity)")
+    ap.add_argument("--parquet", required=True)
+    ap.add_argument("--labels",  required=True)
     ap.add_argument("--kfolds",  type=int, default=5)
     ap.add_argument("--seed",    type=int, default=42)
     args = ap.parse_args()

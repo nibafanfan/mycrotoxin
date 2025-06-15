@@ -11,8 +11,9 @@ that have experimental values (not missing) and outputting only:
 - mutagenicity
 
 Each label is binary (0/1):
-- 1 if experimental data contains "genotoxic"/"carcinogenic"/"mutagenic"
-- 0 if experimental data contains "non-genotoxic"/"non-carcinogenic"/"non-mutagenic"
+- 1 if experimental data is exactly "Genotoxic"/"Carcinogenic"/"Mutagenic"
+- 0 if experimental data is exactly "Non-genotoxic"/"Non-carcinogenic"/"Non-mutagenic"
+- NaN for missing or other values
 
 -----------------------------------------------------------------------
 Usage
@@ -21,47 +22,69 @@ Usage
         --out   labels.csv
 -----------------------------------------------------------------------
 """
-import argparse, pandas as pd, re, pathlib, sys
+import argparse
+import pandas as pd
+import pathlib
+import sys
+from typing import Optional
 
-def label_genotoxicity(row) -> float:
-    val = str(row["experimental in vitro genotoxicity"]).lower()
-    if not val or val == "nan" or pd.isna(val):
-        return float("nan")
-    if "genotoxic" in val:
+def label_genotoxicity(val: str) -> Optional[float]:
+    """Label genotoxicity based on exact matches."""
+    if pd.isna(val):
+        return None
+    val = str(val).strip()
+    if val == "Genotoxic":
         return 1.0
-    if "non-genotoxic" in val:
+    if val == "Non-genotoxic":
         return 0.0
-    return float("nan")
+    return None
 
-def label_carcinogenicity(row) -> float:
-    val = str(row["experimental carcinogenicity"]).lower()
-    if not val or val == "nan" or pd.isna(val):
-        return float("nan")
-    if "carcinogenic" in val:
+def label_carcinogenicity(val: str) -> Optional[float]:
+    """Label carcinogenicity based on exact matches."""
+    if pd.isna(val):
+        return None
+    val = str(val).strip()
+    if val == "Carcinogenic":
         return 1.0
-    if "non-carcinogenic" in val:
+    if val == "Non-carcinogenic":
         return 0.0
-    return float("nan")
+    return None
 
-def label_mutagenicity(row) -> float:
-    val = str(row["experimental mutagenicity"]).lower()
-    if not val or val == "nan" or pd.isna(val):
-        return float("nan")
-    if "mutagenic" in val:
+def label_mutagenicity(val: str) -> Optional[float]:
+    """Label mutagenicity based on exact matches."""
+    if pd.isna(val):
+        return None
+    val = str(val).strip()
+    if val == "Mutagenic":
         return 1.0
-    if "non-mutagenic" in val:
+    if val == "Non-mutagenic":
         return 0.0
-    return float("nan")
+    return None
 
 def main(meta_path: str, out_path: str):
-    df = pd.read_csv(meta_path, sep=";")
+    # Read and validate input file
+    try:
+        df = pd.read_csv(meta_path, sep=";")
+    except Exception as e:
+        sys.exit(f"Error reading metadata file: {e}")
+    
     if "cid" not in df.columns:
         sys.exit("The metadata file must contain a 'cid' column.")
     
-    # Add label columns
-    df["genotoxicity"] = df.apply(label_genotoxicity, axis=1)
-    df["carcinogenicity"] = df.apply(label_carcinogenicity, axis=1)
-    df["mutagenicity"] = df.apply(label_mutagenicity, axis=1)
+    required_cols = [
+        "experimental in vitro genotoxicity",
+        "experimental carcinogenicity",
+        "experimental mutagenicity"
+    ]
+    
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        sys.exit(f"Missing required columns: {', '.join(missing_cols)}")
+    
+    # Add label columns using exact matches
+    df["genotoxicity"] = df["experimental in vitro genotoxicity"].apply(label_genotoxicity)
+    df["carcinogenicity"] = df["experimental carcinogenicity"].apply(label_carcinogenicity)
+    df["mutagenicity"] = df["experimental mutagenicity"].apply(label_mutagenicity)
     
     # Keep only rows that have at least one experimental value
     has_experimental = (
@@ -81,16 +104,29 @@ def main(meta_path: str, out_path: str):
         "carcinogenicity",
         "mutagenicity"
     ]
-    df[out_cols].to_csv(out_path, index=False)
     
-    print(f"✔ labels → {pathlib.Path(out_path).resolve()}  ({df.shape[0]} rows)")
-    print(f"  • genotoxicity: {df['genotoxicity'].sum():.0f} active, {df['genotoxicity'].isna().sum()} missing")
-    print(f"  • carcinogenicity: {df['carcinogenicity'].sum():.0f} active, {df['carcinogenicity'].isna().sum()} missing")
-    print(f"  • mutagenicity: {df['mutagenicity'].sum():.0f} active, {df['mutagenicity'].isna().sum()} missing")
+    # Save output
+    try:
+        df[out_cols].to_csv(out_path, index=False)
+    except Exception as e:
+        sys.exit(f"Error saving output file: {e}")
+    
+    # Print summary statistics
+    print(f"\n✔ Labels saved to: {pathlib.Path(out_path).resolve()}")
+    print(f"  Total rows: {df.shape[0]}")
+    
+    for prop in ["genotoxicity", "carcinogenicity", "mutagenicity"]:
+        active = df[prop].sum()
+        inactive = (df[prop] == 0).sum()
+        missing = df[prop].isna().sum()
+        print(f"\n{prop.title()}:")
+        print(f"  • Active (1): {active:.0f}")
+        print(f"  • Inactive (0): {inactive:.0f}")
+        print(f"  • Missing: {missing}")
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Convert experimental data to binary labels")
     ap.add_argument("--meta", required=True, help="semicolon-separated metadata table")
-    ap.add_argument("--out",  default="labels.csv", help="output labels file")
+    ap.add_argument("--out", default="labels.csv", help="output labels file")
     args = ap.parse_args()
     main(args.meta, args.out)
