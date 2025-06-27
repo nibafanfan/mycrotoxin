@@ -42,7 +42,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 CATS       = {"carcinogenicity", "mutagenicity", "genotoxicity"}
 ENDPOINTS  = ["genotoxicity", "carcinogenicity", "mutagenicity"]
-C_GRID     = [0.02, 0.1, 0.5, 1]       # shared across all folds
+C_GRID     = [0.002, 0.01, 0.05, 0.1]       # shared across all folds
 MAX_ITER   = 10_000
 
 # ──────────────────────────────────────────────────────────────────────────────
